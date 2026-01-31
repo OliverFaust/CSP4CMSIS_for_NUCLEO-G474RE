@@ -32,6 +32,7 @@ A demonstration of the CSP (Communicating Sequential Processes) library for CMSI
 - `lib/CSP4CMSIS/` - CSP library
 - `Middlewares/` - FreeRTOS middleware
 
+```text
 ## Example Output
 Welcome to STM32 world !
 === STM32 FreeRTOS + CSP4CMSIS bootstrap ===

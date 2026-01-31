@@ -50,4 +50,4 @@ MIT License
 ## Acknowledgments
 - STMicroelectronics for the HAL library
 - FreeRTOS team
-- CSP4CMSIS library contributors
+

@@ -4,9 +4,9 @@ Release/
 build/
 
 # IDE files
-.project
-.cproject
-.settings/
+#.project
+#.cproject
+#.settings/
 
 # Compiled files
 *.elf
@@ -26,5 +26,3 @@ build/
 .DS_Store
 Thumbs.db
 
-# Dependency directories
-Third_Party/

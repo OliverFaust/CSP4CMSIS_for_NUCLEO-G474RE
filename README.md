@@ -20,7 +20,7 @@ A demonstration of the CSP (Communicating Sequential Processes) library for CMSI
 - Parity: None
 
 ## Building with STM32CubeIDE
-1. Clone this repository
+1. Clone this repository. Any directory will do but not the STM32CubeIDE workspace. 
 2. Open STM32CubeIDE
 3. File → Import → Existing Projects into Workspace
 4. Select this directory

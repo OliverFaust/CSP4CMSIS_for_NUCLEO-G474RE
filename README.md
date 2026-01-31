@@ -32,8 +32,8 @@ A demonstration of the CSP (Communicating Sequential Processes) library for CMSI
 - `lib/CSP4CMSIS/` - CSP library
 - `Middlewares/` - FreeRTOS middleware
 
-```text
 ## Example Output
+```text
 Welcome to STM32 world !
 === STM32 FreeRTOS + CSP4CMSIS bootstrap ===
 --- BOli2 Launching CSP Static Network (Zero-Heap) ---
@@ -42,6 +42,7 @@ Welcome to STM32 world !
 [Receiver] Task running. Using Resident-Guard ALT.
 [Receiver] Verified 10000 messages...
 [Receiver] SUCCESS: 2000000 messages verified heap-free.
+```
 
 ## License
 MIT License

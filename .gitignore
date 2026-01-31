@@ -1,0 +1,30 @@
+# Build directories
+Debug/
+Release/
+build/
+
+# IDE files
+.project
+.cproject
+.settings/
+
+# Compiled files
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.o
+*.su
+*.d
+*.cyclo
+
+# CubeIDE generated
+*.launch
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Dependency directories
+Third_Party/

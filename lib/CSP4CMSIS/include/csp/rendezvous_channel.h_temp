@@ -1,0 +1,224 @@
+// --- rendezvous_channel.h (FINAL CORRECTED VERSION - Removing invalid 'override') ---
+
+#ifndef CSP4CMSIS_RENDEZVOUS_CHANNEL_H
+
+#define CSP4CMSIS_RENDEZVOUS_CHANNEL_H
+
+
+
+#include "channel_base.h"
+
+#include "alt_channel_sync.h"
+
+#include "FreeRTOS.h"
+
+#include "task.h"
+
+#include "time.h"
+
+#include <cstring>
+
+#include <stddef.h>
+
+
+
+namespace csp {
+
+class Guard;
+
+}
+
+
+
+namespace csp::internal {
+
+
+
+#define WAIT_SLICE_TICKS pdMS_TO_TICKS(100)
+
+
+
+template <typename T>
+
+class RendezvousChannel : public BaseAltChan<T> {
+
+private:
+
+AltChanSyncBase sync_base;
+
+
+
+void safe_indefinite_block() {
+
+bool success = false;
+
+while (!success) {
+
+success = (ulTaskNotifyTake(pdTRUE, WAIT_SLICE_TICKS) == pdPASS);
+
+}
+
+}
+
+
+
+public:
+
+RendezvousChannel() = default;
+
+~RendezvousChannel() override = default;
+
+
+
+internal::AltChanSyncBase* getSyncBase() {
+
+return &sync_base;
+
+}
+
+
+
+// --- BaseChan<T> Blocking I/O Overrides (The core non-Alt transfer) ---
+
+
+virtual void input(T* const dest) override {
+
+
+// 1. Try for an immediate match.
+
+if (sync_base.tryRendezvous((void*)dest, sizeof(T), false /* is_writer */)) {
+
+return; // Immediate match found and completed.
+
+}
+
+
+xTaskNotifyStateClear(xTaskGetCurrentTaskHandle());
+
+
+
+// 2. No match found. Register self and block indefinitely.
+
+sync_base.registerBlockingTask((void*)dest, false /* is_writer */);
+
+safe_indefinite_block();
+
+}
+
+
+
+virtual void output(const T* const source) override {
+
+
+// 1. Try for an immediate match.
+
+if (sync_base.tryRendezvous((void*)source, sizeof(T), true /* is_writer */)) {
+
+return; // Immediate match found and completed.
+
+}
+
+
+
+xTaskNotifyStateClear(xTaskGetCurrentTaskHandle());
+
+
+
+// 2. No match found. Register self and block indefinitely.
+
+sync_base.registerBlockingTask((void*)source, true /* is_writer */);
+
+safe_indefinite_block();
+
+}
+
+
+
+// --- BaseAltChan<T> Guard Overrides (Alternative Support) ---
+
+
+
+// REQUIRED PURE VIRTUAL from BaseAltChan<T> (No arguments)
+
+virtual internal::Guard* inputGuard() override {
+
+// Since this typed channel uses the Guard with a buffer reference,
+
+// we return nullptr for the no-argument version, or assume the user uses the typed version.
+
+// Returning nullptr is safer than returning an invalid Guard object.
+
+return nullptr;
+
+}
+
+
+// TYPED GUARD METHOD (Assuming this is required by the user-facing Chanin/Chanout wrappers)
+
+// NOTE: Removed 'virtual' and 'override' from this specific method to avoid confusion
+
+// with the base class's no-argument 'inputGuard()'.
+
+internal::Guard* inputGuard(T& dest) {
+
+return new internal::ChanInGuard(getSyncBase(), &dest, sizeof(T));
+
+}
+
+
+
+// TYPED GUARD METHOD
+
+// NOTE: Removed 'virtual' and 'override' from this specific method.
+
+internal::Guard* outputGuard(const T& source) {
+
+return new internal::ChanOutGuard(getSyncBase(), &source, sizeof(T));
+
+}
+
+
+virtual bool pending() override {
+
+return sync_base.getWaitingInAlt().alt_ptr != nullptr ||
+
+sync_base.getWaitingOutAlt().alt_ptr != nullptr;
+
+}
+
+
+// --- External I/O Stubs ---
+
+
+
+virtual void beginExtInput(T* const dest) override {}
+
+virtual void endExtInput() override {}
+
+
+// --- Timed I/O Stubs ---
+
+// FIX: Removed 'override' keyword as these functions are not defined in the base class contract.
+
+virtual bool input_with_timeout(T* const dest, TickType_t timeout) {
+
+return false;
+
+}
+
+
+virtual bool output_with_timeout(const T* const source, TickType_t timeout) {
+
+return false;
+
+}
+
+};
+
+
+
+} // namespace csp::internal
+
+
+
+#endif // CSP4CMSIS_RENDEZVOUS_CHANNEL_H

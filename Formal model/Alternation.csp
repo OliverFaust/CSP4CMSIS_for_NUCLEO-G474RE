@@ -1,0 +1,62 @@
+-- =========================================================
+-- Constants and System Parameters
+-- =========================================================
+-- Bounding the maximum sequence number to prevent ProB state explosion.
+-- In the C++ implementation this is 1,000,000, but for exhaustive
+-- formal verification, a small modulus is sufficient.
+MAX_SEQ = 3
+
+-- =========================================================
+-- Channels
+-- =========================================================
+-- Channels carry a tuple of (source_id, sequence_num)
+channel chan_A : Int.Int
+channel chan_B : Int.Int
+
+-- Observable event for test failure (sequence mismatch)
+channel error_found
+
+-- =========================================================
+-- Sender Processes
+-- =========================================================
+-- Senders output their static ID (1 for A, 2 for B) and a sequence counter,
+-- then loop back with an incremented (modulo) counter.
+SenderA(c) = 
+    chan_A!1!c -> SenderA((c+1) % MAX_SEQ)
+
+SenderB(c) = 
+    chan_B!2!c -> SenderB((c+1) % MAX_SEQ)
+
+-- =========================================================
+-- Receiver Process (External Choice)
+-- =========================================================
+-- The receiver monitors both channels simultaneously. 
+-- The '[]' operator implements the mathematical External Choice, 
+-- mapped to the 'alt.fairSelect()' mechanic in the C++ library.
+Receiver(nextA, nextB) =
+    (
+        chan_A?id?seq ->
+            if (id == 1 and seq == nextA) then
+                Receiver((nextA+1) % MAX_SEQ, nextB)
+            else
+                error_found -> SKIP
+    )
+    []
+    (
+        chan_B?id?seq ->
+            if (id == 2 and seq == nextB) then
+                Receiver(nextA, (nextB+1) % MAX_SEQ)
+            else
+                error_found -> SKIP
+    )
+
+-- =========================================================
+-- System Composition
+-- =========================================================
+-- The senders execute completely independently of each other (Interleaving: |||).
+-- The interleaved senders are synchronized with the Receiver across the
+-- shared alphabet of both communication channels.
+SYSTEM = 
+    (SenderA(0) ||| SenderB(0)) 
+    [| {| chan_A, chan_B |} |] 
+    Receiver(0, 0)

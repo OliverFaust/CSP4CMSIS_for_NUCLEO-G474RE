@@ -1,6 +1,6 @@
 # CSP4CMSIS Demo for NUCLEO-G474RE
 
-A demonstration of the CSP (Communicating Sequential Processes) library for CMSIS-RTOS v2 on STM32G474RE microcontroller.
+A demonstration of the CSP (Communicating Sequential Processes) library for CMSIS-RTOS v2 on STM32G474RE microcontroller. The formal model is available [here](https://github.com/OliverFaust/CSP4CMSIS_for_NUCLEO-G474RE/tree/develop/Formal%20model).
 
 ## Features
 - FreeRTOS with CMSIS-RTOS v2 API

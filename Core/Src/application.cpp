@@ -8,6 +8,25 @@
 #define CHECK_INTERVAL 10000
 #define MAX_TOTAL_MESSAGES (TOTAL_MESSAGES_PER_SENDER * 2)
 
+// How often to print a stack-usage report for the whole network. This is
+// a *live* reading (CSProcess::stackHighWaterMarkWords()), not a one-shot
+// end-of-run report, because Sender/Receiver below run forever. See
+// freertos-stack-usage-estimation-brief.md for what the number means and
+// its caveats: it's a measured worst-observed-so-far, not a proven bound,
+// and is only trustworthy once the deepest call path has actually been
+// exercised.
+#ifndef CSP_STACK_REPORT_INTERVAL_MS
+#define CSP_STACK_REPORT_INTERVAL_MS (3000)
+#endif
+
+// MainApp_Task isn't a CSProcess, so it doesn't get a static stack/TCB
+// "for free" from CSProcessStatic<N> -- it is still spawned with a plain
+// (dynamic) xTaskCreate() here, but we keep its handle so the report loop
+// below can measure its own headroom too, same live-HWM approach as
+// CSProcess::stackHighWaterMarkWords(), just without a CSProcess object
+// to hang it off of.
+#define MAIN_APP_STACK_WORDS 2048
+
 using namespace csp;
 
 struct Message {
@@ -20,12 +39,20 @@ struct Message {
 using AltChannel = Channel<Message>;
 
 // --- 2. Define Processes ---
-class Sender : public CSProcess {
+// API 1.3: CSP4CMSIS makes no dynamic (heap) allocations for task
+// creation -- every CSProcess supplies its own stack buffer and TCB as
+// static storage via CSProcessStatic<N>, so the stack depth is a fixed,
+// compile-time property of the process (queried by Run()/ParallelHelper
+// to build the xTaskCreateStatic() call, and by
+// stackHighWaterMarkWords() below to report headroom).
+class Sender : public CSProcessStatic<256> {
 private:
     Chanout<Message> out;
     int id;
 public:
     Sender(Chanout<Message> w, int sender_id) : out(w), id(sender_id) {}
+
+    const char* name() const override { return "Sender"; }
 
     void run() override {
         printf("[Sender %d] Starting sequence.\r\n", id);
@@ -40,12 +67,14 @@ public:
     }
 };
 
-class Receiver : public CSProcess {
+class Receiver : public CSProcessStatic<512> {
 private:
     Chanin<Message> inA;
     Chanin<Message> inB;
 public:
     Receiver(Chanin<Message> rA, Chanin<Message> rB) : inA(rA), inB(rB) {}
+
+    const char* name() const override { return "Receiver"; }
 
     void run() override {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -98,6 +127,10 @@ public:
     }
 };
 
+// Set by csp_app_main_init() right after xTaskCreate() succeeds, so the
+// report loop below can measure MainApp_Task's own headroom too.
+static TaskHandle_t s_main_app_task_handle = NULL;
+
 // --- 3. The Main Application Task ---
 void MainApp_Task(void* params) {
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -113,15 +146,55 @@ void MainApp_Task(void* params) {
     static Sender sB(chan_B.writer(), 2);
     static Receiver r1(chan_A.reader(), chan_B.reader());
 
-    // Run parallel processes using static execution
-    Run(
-        InParallel(sA, sB, r1),
-        ExecutionMode::StaticNetwork
-    );
+    // Run parallel processes using static execution.
+    // Kept as a named object, rather than an InParallel(...) temporary
+    // passed straight into Run(), so we can keep using it below --
+    // ParallelHelper still holds references to sA/sB/r1 after Run()
+    // returns, which forEachProcess() needs for the report loop.
+    auto network = InParallel(sA, sB, r1);
+    Run(network, ExecutionMode::StaticNetwork);
+
+    printf("*** MainApp_Task: Run() returned, entering report loop ***\r\n");
+
+    // sA/sB/r1 never return from run(), so there's no "network finished"
+    // point to report stack usage at -- report periodically instead.
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(CSP_STACK_REPORT_INTERVAL_MS));
+
+        if (s_main_app_task_handle != NULL) {
+            UBaseType_t hwm = uxTaskGetStackHighWaterMark(s_main_app_task_handle);
+            size_t unused_bytes = hwm * sizeof(StackType_t);
+            printf("MainApp_Task: %u bytes unused headroom (%u words HWM, of %u allocated)\r\n",
+                    (unsigned)unused_bytes, (unsigned)hwm, (unsigned)MAIN_APP_STACK_WORDS);
+        }
+
+        network.forEachProcess([](CSProcess& p) {
+            // API 1.3: stack depth is fixed at compile time -- no more
+            // resolveStackWords()/fallback constant to consult, just ask
+            // the process directly.
+            size_t allocated_words = p.stackWords();
+            size_t allocated_bytes = allocated_words * sizeof(StackType_t);
+
+            UBaseType_t hwm = p.stackHighWaterMarkWords();
+            if (hwm == CSP_STACK_HWM_UNAVAILABLE) {
+                printf("%s: allocated = %u words (%u bytes), HWM unavailable\r\n",
+                        p.name(), (unsigned)allocated_words, (unsigned)allocated_bytes);
+            } else {
+                size_t unused_bytes = hwm * sizeof(StackType_t);
+                size_t used_bytes = (unused_bytes <= allocated_bytes)
+                                        ? allocated_bytes - unused_bytes
+                                        : 0; // guard against any inconsistency
+                printf("%s: %u/%u bytes used (%u bytes unused headroom, %u words HWM)\r\n",
+                        p.name(), (unsigned)used_bytes, (unsigned)allocated_bytes,
+                        (unsigned)unused_bytes, (unsigned)hwm);
+            }
+        });
+    }
 }
 
 void csp_app_main_init(void) {
-	BaseType_t status = xTaskCreate(MainApp_Task, "MainApp", 2048, NULL, tskIDLE_PRIORITY + 3, NULL);
+	BaseType_t status = xTaskCreate(MainApp_Task, "MainApp", MAIN_APP_STACK_WORDS, NULL,
+	                                 tskIDLE_PRIORITY + 3, &s_main_app_task_handle);
 	if (status != pdPASS) {
 	    printf("ERROR: MainApp_Task creation failed!\r\n");
 	}

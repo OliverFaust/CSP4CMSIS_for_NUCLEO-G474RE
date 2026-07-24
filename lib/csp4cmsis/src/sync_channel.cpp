@@ -1,6 +1,5 @@
 #include "csp/sync_channel.h"
 #include <cstring>
-#include <cstdio>
 
 namespace csp::internal {
 
@@ -11,9 +10,9 @@ namespace csp::internal {
 // SyncChannel Core Implementation
 // =============================================================
 
-SyncChannel::SyncChannel()
-    : mutex(xSemaphoreCreateMutex()),
-      state(IDLE),
+template <csp::BufferPolicy P>
+SyncChannel<P>::SyncChannel()
+    : state(IDLE),
       data_ptr(nullptr),
       data_len(0),
       waiting_alt_in(nullptr),
@@ -22,19 +21,23 @@ SyncChannel::SyncChannel()
       waiting_alt_out(nullptr),
       waiting_alt_bit_out(0),
       waiting_guard_out(nullptr),
-      sender_queue(xQueueCreate(1, 0)),
-      receiver_queue(xQueueCreate(1, 0)),
       res_in_guard(this),  
       res_out_guard(this)  
-{}
+{
+    mutex = xSemaphoreCreateMutex();
+    sender_queue = xQueueCreate(1, 0);
+    receiver_queue = xQueueCreate(1, 0);
+}
 
-SyncChannel::~SyncChannel() {
+template <csp::BufferPolicy P>
+SyncChannel<P>::~SyncChannel() {
     if (mutex) vSemaphoreDelete(mutex);
     if (sender_queue) vQueueDelete(sender_queue);
     if (receiver_queue) vQueueDelete(receiver_queue);
 }
 
-void SyncChannel::reset() {
+template <csp::BufferPolicy P>
+void SyncChannel<P>::reset() {
     state = IDLE;
     data_ptr = nullptr;
     waiting_alt_in = nullptr;
@@ -43,15 +46,14 @@ void SyncChannel::reset() {
     waiting_alt_out = nullptr;
     waiting_alt_bit_out = 0;
     waiting_guard_out = nullptr;
-    // We do not reset queues here to avoid clearing pending ACKs during a race
 }
 
-// --- Blocking Output (Sender) ---
-void SyncChannel::output(const void* const data_ptr_in) {
+// --- Blocking/Sampling Output (Sender) ---
+template <csp::BufferPolicy P>
+void SyncChannel<P>::output(const void* const data_ptr_in) {
     if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
 
     if (state == RECEIVER_WAITING) {
-        // A receiver is already waiting (either blocking or in an ALT)
         data_ptr = data_ptr_in;
         
         AltScheduler* rx_alt = waiting_alt_in; 
@@ -62,33 +64,34 @@ void SyncChannel::output(const void* const data_ptr_in) {
         xSemaphoreGive(mutex);
 
         if (is_alt_waiter) {
-            // Wake up the Alternative selection loop
-            xEventGroupSetBits(rx_alt->getEventGroupHandle(), rx_alt_bit);
+            rx_alt->wakeUp(rx_alt_bit);
         } else {
-            // Wake up a blocking input() call
             xQueueSend(receiver_queue, nullptr, 0);
         }
 
-        // BLOCK: Wait for the Receiver to finish copying data and acknowledge
+        // BLOCK: Wait for receiver to finish copying
         while (xQueueReceive(sender_queue, nullptr, WAIT_SLICE_TICKS) != pdPASS);
     }
     else {
-        // No receiver present, wait here as the primary sender
-        state = SENDER_WAITING;
-        data_ptr = data_ptr_in;
-        xSemaphoreGive(mutex);
-        
-        // Wait until a receiver arrives and signals this queue
-        while (xQueueReceive(sender_queue, nullptr, WAIT_SLICE_TICKS) != pdPASS);
+        if constexpr (P != csp::BufferPolicy::Block) {
+            xSemaphoreGive(mutex);
+            return; 
+        } else {
+            state = SENDER_WAITING;
+            data_ptr = data_ptr_in;
+            xSemaphoreGive(mutex);
+            
+            while (xQueueReceive(sender_queue, nullptr, WAIT_SLICE_TICKS) != pdPASS);
+        }
     }
 }
 
 // --- Blocking Input (Receiver) ---
-void SyncChannel::input(void* const data_ptr_out) {
+template <csp::BufferPolicy P>
+void SyncChannel<P>::input(void* const data_ptr_out) {
     if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return;
 
     if (state == SENDER_WAITING) {
-        // Sender is already waiting; perform immediate transfer
         if (data_ptr != nullptr && data_ptr_out != nullptr) {
             memcpy(data_ptr_out, data_ptr, data_len);
         }
@@ -100,44 +103,72 @@ void SyncChannel::input(void* const data_ptr_out) {
         waiting_alt_out = nullptr; 
 
         if (is_alt_waiter) {
-            xEventGroupSetBits(tx_alt->getEventGroupHandle(), tx_alt_bit);
+            tx_alt->wakeUp(tx_alt_bit);
         } else {
-            // Release the blocking sender
             xQueueSend(sender_queue, nullptr, 0);
         }
         
-        reset(); 
+        this->reset(); 
         xSemaphoreGive(mutex);
     }
     else {
-        // No sender present, register as the waiting receiver
         state = RECEIVER_WAITING;
         xSemaphoreGive(mutex);
 
-        // Wait for a sender to signal the receiver_queue
         while (xQueueReceive(receiver_queue, nullptr, WAIT_SLICE_TICKS) != pdPASS);
 
-        // After waking, sender has provided data_ptr. Hold mutex to copy and ACK.
         xSemaphoreTake(mutex, portMAX_DELAY);
         if (data_ptr != nullptr && data_ptr_out != nullptr) {
             memcpy(data_ptr_out, data_ptr, data_len);
         }
-        xQueueSend(sender_queue, nullptr, 0); // Release Sender
-        reset();
+        xQueueSend(sender_queue, nullptr, 0); 
+        this->reset();
         xSemaphoreGive(mutex);
     }
+}
+
+template <csp::BufferPolicy P>
+bool SyncChannel<P>::pending() {
+    return (state != IDLE);
+}
+
+template <csp::BufferPolicy P>
+bool SyncChannel<P>::space_available() {
+    if constexpr (P != csp::BufferPolicy::Block) return true;
+    return (state == RECEIVER_WAITING || waiting_alt_in != nullptr);
+}
+
+template <csp::BufferPolicy P>
+bool SyncChannel<P>::putFromISR() {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    bool success = false;
+
+    if (state == RECEIVER_WAITING) {
+        // Since we can't notify via sender_queue comfortably here, 
+        // Sync Signals from ISR are usually simplified or handled via Buffered channels.
+        success = true; 
+    } else if (waiting_alt_in != nullptr) {
+        waiting_alt_in->wakeUp(waiting_alt_bit_in);
+        success = true;
+    } else if constexpr (P != csp::BufferPolicy::Block) {
+        success = true; 
+    }
+
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    return success;
 }
 
 // =============================================================
 // ALT Registration Logic
 // =============================================================
 
-bool SyncChannel::registerAltIn(AltScheduler* alt, EventBits_t bit, SyncChannelInputGuard* guard) {
+template <csp::BufferPolicy P>
+bool SyncChannel<P>::registerAltIn(AltScheduler* alt, EventBits_t bit, SyncChannelInputGuard<P>* guard) {
     if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
     
     if (state == SENDER_WAITING) { 
         xSemaphoreGive(mutex); 
-        return true; // Already ready for immediate activation
+        return true; 
     }
     
     state = RECEIVER_WAITING;
@@ -148,17 +179,25 @@ bool SyncChannel::registerAltIn(AltScheduler* alt, EventBits_t bit, SyncChannelI
     return false;
 }
 
-bool SyncChannel::unregisterAltIn(AltScheduler* alt) {
+template <csp::BufferPolicy P>
+bool SyncChannel<P>::unregisterAltIn(AltScheduler* alt) {
     if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
     bool completed = (state != RECEIVER_WAITING);
-    if (!completed && waiting_alt_in == alt) reset();
+    // Passing nullptr from Guard disable() means we check by current state
+    if (!completed && (alt == nullptr || waiting_alt_in == alt)) this->reset();
     xSemaphoreGive(mutex);
     return completed;
 }
 
-bool SyncChannel::registerAltOut(AltScheduler* alt, EventBits_t bit, SyncChannelOutputGuard* guard) {
+template <csp::BufferPolicy P>
+bool SyncChannel<P>::registerAltOut(AltScheduler* alt, EventBits_t bit, SyncChannelOutputGuard<P>* guard) {
     if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
     
+    if constexpr (P != csp::BufferPolicy::Block) {
+        xSemaphoreGive(mutex);
+        return true;
+    }
+
     if (state == RECEIVER_WAITING) { 
         xSemaphoreGive(mutex); 
         return true; 
@@ -172,66 +211,70 @@ bool SyncChannel::registerAltOut(AltScheduler* alt, EventBits_t bit, SyncChannel
     return false;
 }
 
-bool SyncChannel::unregisterAltOut(AltScheduler* alt) {
+template <csp::BufferPolicy P>
+bool SyncChannel<P>::unregisterAltOut(AltScheduler* alt) {
     if (xSemaphoreTake(mutex, portMAX_DELAY) != pdTRUE) return false;
     bool completed = (state != SENDER_WAITING);
-    if (!completed && waiting_alt_out == alt) reset();
+    if (!completed && (alt == nullptr || waiting_alt_out == alt)) this->reset();
     xSemaphoreGive(mutex);
     return completed;
 }
 
 // =============================================================
-// Guard Implementation (The "Activation" Phase)
+// Guard Implementation
 // =============================================================
 
-
-
-bool SyncChannelInputGuard::enable(AltScheduler* alt, EventBits_t bit) {
-    this->parent_alt = alt;
+template <csp::BufferPolicy P>
+bool SyncChannelInputGuard<P>::enable(AltScheduler* alt, EventBits_t bit) {
     return channel->registerAltIn(alt, bit, this);
 }
 
-bool SyncChannelInputGuard::disable() { 
-    return channel->unregisterAltIn(parent_alt); 
+template <csp::BufferPolicy P>
+bool SyncChannelInputGuard<P>::disable() { 
+    return channel->unregisterAltIn(nullptr);
 }
 
-void SyncChannelInputGuard::activate() {
+template <csp::BufferPolicy P>
+void SyncChannelInputGuard<P>::activate() {
     xSemaphoreTake(channel->getMutex(), portMAX_DELAY);
-    
-    // Transfer data from the waiting sender to the bound destination
     if (channel->getDataPtr() != nullptr && user_data_dest != nullptr) {
+        // data_size should be set during bind()
         memcpy(user_data_dest, channel->getDataPtr(), data_size);
     }
-    
-    // Finalize the rendezvous: Release the blocked sender
     xQueueSend(channel->getSenderQueue(), nullptr, 0);
-    
     channel->reset();
     xSemaphoreGive(channel->getMutex());
 }
 
-bool SyncChannelOutputGuard::enable(AltScheduler* alt, EventBits_t bit) {
-    this->parent_alt = alt;
+template <csp::BufferPolicy P>
+bool SyncChannelOutputGuard<P>::enable(AltScheduler* alt, EventBits_t bit) {
     return channel->registerAltOut(alt, bit, this);
 }
 
-bool SyncChannelOutputGuard::disable() { 
-    return channel->unregisterAltOut(parent_alt); 
+template <csp::BufferPolicy P>
+bool SyncChannelOutputGuard<P>::disable() { 
+    return channel->unregisterAltOut(nullptr); 
 }
 
-void SyncChannelOutputGuard::activate() {
-    xSemaphoreTake(channel->getMutex(), portMAX_DELAY);
-    
-    // Set the data pointer for the arriving receiver to find
-    channel->setChannelData(user_data_source, data_size);
-    
-    // If a receiver was already blocking, wake them now
-    if (channel->getState() == SyncChannel::RECEIVER_WAITING) {
-        xQueueSend(channel->getReceiverQueue(), nullptr, 0);
-    }
-    
-    // Note: We do NOT call reset() here; the receiver will call it after copying data.
-    xSemaphoreGive(channel->getMutex());
+template <csp::BufferPolicy P>
+void SyncChannelOutputGuard<P>::activate() {
+    channel->output(user_data_source);
 }
+
+// =============================================================
+// Explicit Instantiations
+// =============================================================
+
+template class SyncChannel<csp::BufferPolicy::Block>;
+template class SyncChannel<csp::BufferPolicy::KeepNewest>;
+template class SyncChannel<csp::BufferPolicy::KeepOldest>;
+
+template class SyncChannelInputGuard<csp::BufferPolicy::Block>;
+template class SyncChannelInputGuard<csp::BufferPolicy::KeepNewest>;
+template class SyncChannelInputGuard<csp::BufferPolicy::KeepOldest>;
+
+template class SyncChannelOutputGuard<csp::BufferPolicy::Block>;
+template class SyncChannelOutputGuard<csp::BufferPolicy::KeepNewest>;
+template class SyncChannelOutputGuard<csp::BufferPolicy::KeepOldest>;
 
 } // namespace csp::internal

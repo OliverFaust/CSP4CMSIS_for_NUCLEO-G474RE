@@ -46,22 +46,23 @@ COM_InitTypeDef BspCOMInit;
 __IO uint32_t BspButtonState = BUTTON_RELEASED;
 UART_HandleTypeDef huart1;
 
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
-  .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 512 * 4
-};
 /* USER CODE BEGIN PV */
-
+/* NOTE: The CubeMX-generated "defaultTask" (osThreadNew(StartDefaultTask, ...))
+ * has been intentionally removed. It carried no functionality (an infinite
+ * osDelay(1) loop) and, because osThreadAttr_t supplied no .cb_mem/.stack_mem,
+ * CMSIS-RTOS2 created it via the dynamic FreeRTOS allocation path
+ * (xTaskCreate -> pvPortMalloc). Removing it makes this image's task creation
+ * fully static, matching CSP4CMSIS's own CSProcessStatic<N>-based processes.
+ *
+ * If this file is regenerated from the .ioc, defaultTask will reappear here.
+ * Remove it from Middleware -> FREERTOS -> Tasks and Queues in STM32CubeMX
+ * so it is not regenerated. */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
-void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 #ifdef __cplusplus
@@ -132,11 +133,10 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-
   /* USER CODE BEGIN RTOS_THREADS */
-
+  /* defaultTask intentionally not created here -- see USER CODE BEGIN PV note
+   * above. All application tasks are created statically by CSP4CMSIS inside
+   * csp_app_main_init() below. */
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -320,24 +320,6 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
-
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
-{
-  /* USER CODE BEGIN 5 */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END 5 */
-}
 
 /**
   * @brief  Period elapsed callback in non blocking mode

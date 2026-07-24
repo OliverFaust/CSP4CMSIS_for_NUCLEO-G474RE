@@ -22,6 +22,9 @@ namespace csp {
          */
         class Guard {
         public:
+            /**
+             * @return true if the guard is ALREADY ready (immediate rendezvous).
+             */
             virtual bool enable(AltScheduler* alt, EventBits_t bit) = 0;
             virtual bool disable() = 0;
             virtual void activate() = 0;
@@ -32,11 +35,27 @@ namespace csp {
         private:
             TaskHandle_t waiting_task_handle = nullptr;
             EventGroupHandle_t event_group = nullptr;
+            // API 1.3: backing storage for xEventGroupCreateStatic() --
+            // no heap allocation for the event group, matching task
+            // creation's move to xTaskCreateStatic(). Unlike TaskCtx (see
+            // process.h), this buffer never needs to outlive `this`: it's
+            // only ever touched by this object's own methods
+            // (select()/wakeUp()), never handed to another independently-
+            // scheduled task, so there's no separate lifetime to design
+            // around -- it just needs normal member lifetime.
+            StaticEventGroup_t event_group_buffer;
         public:
             AltScheduler();
             ~AltScheduler(); 
             void initForCurrentTask(); 
+            
+            /**
+             * @brief The core ALT selection logic.
+             * @param offset Used for Fair Alts to prevent starvation.
+             * @return The index of the selected guard.
+             */
             unsigned int select(Guard** guardArray, size_t amount, size_t offset = 0);
+            
             void wakeUp(EventBits_t bit); 
             EventGroupHandle_t getEventGroupHandle() const { return event_group; }
         };
@@ -55,11 +74,22 @@ namespace csp {
             bool disable() override; 
             void activate() override; 
         };
+
+        /**
+         * @brief A Skip Guard (Always ready).
+         * Used internally when a Channel Policy is non-blocking.
+         */
+        class SkipGuard : public Guard {
+        public:
+            bool enable(AltScheduler*, EventBits_t) override { return true; }
+            bool disable() override { return true; }
+            void activate() override {} 
+        };
+
     } // namespace internal
 
     /**
      * @brief Glue logic for Pipe Syntax (chan | msg).
-     * MOVED HERE: Now fully defined before being used in public_channel.h or Alternative.
      */
     template <typename T, typename ChanType>
     struct ChannelBinding {
@@ -68,14 +98,13 @@ namespace csp {
 
         ChannelBinding(ChanType& c, T& d) : channel(c), data_ref(d) {}
 
-        // Access the internal guard from the channel
         internal::Guard* getInternalGuard() const {
             return channel.getGuard(data_ref); 
         }
     };
 
     /**
-     * @brief Public Wrapper for Guards to resolve naming conflicts.
+     * @brief Public Wrapper for Guards.
      */
     class Guard {
     public:
@@ -94,6 +123,10 @@ namespace csp {
         ~RelTimeoutGuard() override = default;
     };
 
+    /**
+     * @brief The Alternative (ALT) construct.
+     * Manages multiple guards and selects the first one available.
+     */
     class Alternative {
     private:
         static const size_t MAX_GUARDS = 16;
@@ -104,11 +137,7 @@ namespace csp {
         
     public:
         Alternative() : num_guards(0) {}
-        ~Alternative() = default;
-
-        /**
-         * @brief Variadic constructor to allow Alternative alt(in1 | msg1, timer);
-         */
+        
         template <typename... Bindings>
         Alternative(Bindings... bindings) : num_guards(0) {
             (addBinding(bindings), ...);
@@ -117,11 +146,18 @@ namespace csp {
         Alternative(std::initializer_list<internal::Guard*> guard_list);
         Alternative(std::initializer_list<csp::Guard*> guard_list);
 
+        /**
+         * @brief Priority Select: Always checks guards in the order they were added.
+         */
         int priSelect();  
+
+        /**
+         * @brief Fair Select: Rotates the starting index to ensure all guards get a turn.
+         */
         int fairSelect(); 
 
-    private:
-        // Binding helper for Input Channels
+        // --- Binding Helpers ---
+
         template <typename T>
         void addBinding(const ChannelBinding<T, Chanin<T>>& b) {
             if (num_guards < MAX_GUARDS) {
@@ -129,7 +165,6 @@ namespace csp {
             }
         }
 
-        // Binding helper for Output Channels
         template <typename T>
         void addBinding(const ChannelBinding<const T, Chanout<T>>& b) {
             if (num_guards < MAX_GUARDS) {
@@ -137,14 +172,12 @@ namespace csp {
             }
         }
 
-        // Binding helper for Timers
         void addBinding(RelTimeoutGuard& tg) {
             if (num_guards < MAX_GUARDS) {
                 internal_guards[num_guards++] = tg.internal_guard_ptr;
             }
         }
         
-        // Handle direct internal guards if passed
         void addBinding(internal::Guard* g) {
             if (num_guards < MAX_GUARDS) {
                 internal_guards[num_guards++] = g;

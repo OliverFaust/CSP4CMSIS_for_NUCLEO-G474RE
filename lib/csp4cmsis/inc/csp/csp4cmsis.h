@@ -22,11 +22,11 @@ namespace csp { /* Forward declare namespace content here if needed */ }
 #include "buffered_channel.h"// For future implementation
 #include "barrier.h"         // Standard CSP primitive
 #include "public_channel.h"  // Includes One2OneChannel<T>
-#include "public_task.h"     // Includes CSProcess, Run() function
-#include "run.h"             // <--- NEW: Includes InParallel/InSequence helpers
+#include "public_task.h"     // Includes CSProcess, SleepFor(), etc.
+#include "run.h"             // <--- NEW: Includes InParallel/InSequence helpers, and Run()
 
-// Note: The file public_task.h should now contain the definition/declaration 
-// of the base Run(CSProcess&, UBaseType_t) function signature.
+// Note: Run() is defined in run.h, and is the single spawn path for both
+// one-process and multi-process compositions -- use Run(InParallel(...)).
 
 #endif // __cplusplus
 

@@ -21,9 +21,6 @@ namespace csp::internal {
 
         WaitingAlt() : alt_ptr(nullptr), assigned_bit(0), data_ptr(nullptr), data_size(0) {}
 
-        /**
-         * @brief Atomically configure the ALT registration.
-         */
         void set(AltScheduler* a, EventBits_t b, void* d, size_t s) {
             alt_ptr = a;
             assigned_bit = b;
@@ -31,19 +28,19 @@ namespace csp::internal {
             data_size = s;
         }
 
-        /**
-         * @brief Clear the registration.
-         */
         void clear() {
             alt_ptr = nullptr;
             assigned_bit = 0;
             data_ptr = nullptr;
             data_size = 0;
         }
+
+        bool isActive() const { return alt_ptr != nullptr; }
     };
 
     /**
      * @brief Base synchronization primitive for channels supporting ALT.
+     * Modified to provide explicit partner-status checks for sampling policies.
      */
     class AltChanSyncBase {
     protected:
@@ -63,6 +60,18 @@ namespace csp::internal {
         AltChanSyncBase();
         virtual ~AltChanSyncBase();
 
+        /**
+         * @brief Checks if a partner is ready to communicate right now.
+         * Essential for KeepNewest/KeepOldest policies in Rendezvous.
+         */
+        bool hasReaderWaiting() const {
+            return (waiting_in_task != nullptr) || waiting_in_alt.isActive();
+        }
+
+        bool hasWriterWaiting() const {
+            return (waiting_out_task != nullptr) || waiting_out_alt.isActive();
+        }
+
         // Perform or verify a rendezvous
         bool tryHandshake(void* data_ptr, size_t size, bool is_writer);
         
@@ -72,7 +81,7 @@ namespace csp::internal {
         void clearWaitingIn() { waiting_in_task = nullptr; non_alt_in_data_ptr = nullptr; }
         void clearWaitingOut() { waiting_out_task = nullptr; non_alt_out_data_ptr = nullptr; }
 
-        // Getters for thread safety and logic
+        // Getters
         SemaphoreHandle_t getMutex() { return mutex; }
         TaskHandle_t getWaitingInTask() const { return waiting_in_task; }
         TaskHandle_t getWaitingOutTask() const { return waiting_out_task; }
@@ -92,6 +101,9 @@ namespace csp::internal {
     // Guards: Interfaces between Channels and the AltScheduler
     // =============================================================
 
+    /**
+     * @brief Input Guard for Rendezvous channels.
+     */
     class ChanInGuard : public Guard {
     private: 
         AltChanSyncBase* parent_channel;
@@ -107,6 +119,9 @@ namespace csp::internal {
         void updateBuffer(void* new_dest) { user_data_dest = new_dest; }
     };
 
+    /**
+     * @brief Output Guard for Rendezvous channels.
+     */
     class ChanOutGuard : public Guard { 
     private: 
         AltChanSyncBase* parent_channel;
@@ -119,7 +134,7 @@ namespace csp::internal {
         bool enable(AltScheduler* alt, EventBits_t bit) override;
         bool disable() override;
         void activate() override;
-        void updateBuffer(const void* new_src) { user_data_source = new_src; }
+        void updateBuffer(const void* new_src) { user_data_source = (void*)new_src; }
     };
 }
 #endif

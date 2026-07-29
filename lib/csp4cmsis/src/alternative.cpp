@@ -1,5 +1,9 @@
 #include "csp/alt.h"
 #include <cstdio>
+// Ensure the CMSIS compiler intrinsics are available (often included via device headers)
+extern "C" {
+    #include <cmsis_compiler.h>
+}
 
 namespace csp::internal {
 
@@ -16,7 +20,7 @@ AltScheduler::~AltScheduler() {
 
 void AltScheduler::initForCurrentTask() {
     waiting_task_handle = xTaskGetCurrentTaskHandle();
-    event_group = xEventGroupCreateStatic(&event_group_buffer);
+    event_group = xEventGroupCreate();
 }
 
 unsigned int AltScheduler::select(Guard** guardArray, size_t amount, size_t offset) {
@@ -51,15 +55,24 @@ unsigned int AltScheduler::select(Guard** guardArray, size_t amount, size_t offs
         fired = xEventGroupWaitBits(event_group, wait_mask, pdTRUE, pdFALSE, portMAX_DELAY);
     }
 
-    // Identify which guard fired (lowest bit wins if multiple set simultaneously)
+    // Phase 2.5: Identify which guard fired using GCC intrinsic for O(1) selection
     size_t selected = 0;
-    for(size_t i = 0; i < amount; ++i) {
-        if (fired & (1 << i)) { 
-            selected = i; 
-            break; 
+    if (fired != 0) {
+        // Create a mask to only look at bits from 'offset' up to 31
+        uint32_t offset_mask = 0xFFFFFFFFU << offset;
+        uint32_t masked_fired = fired & offset_mask;
+        
+        if (masked_fired != 0) {
+            // A guard at or above the fairness offset fired.
+            uint32_t lowest_set_bit = masked_fired & -(int32_t)masked_fired;
+            selected = 31 - __builtin_clz(lowest_set_bit);
+        } else {
+            // Wrap-around: only guards strictly below the offset fired.
+            uint32_t lowest_set_bit = fired & -(int32_t)fired;
+            selected = 31 - __builtin_clz(lowest_set_bit);
         }
     }
-
+    
     // Phase 3: Disable
     // Crucial: We tell guards we are leaving. If disable() returns true for a 
     // guard we didn't 'select', it means a rendezvous almost happened but we 
@@ -161,3 +174,4 @@ int Alternative::fairSelect() {
 }
 
 } // namespace csp
+

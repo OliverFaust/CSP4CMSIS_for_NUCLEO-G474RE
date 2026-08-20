@@ -117,7 +117,7 @@ static TaskHandle_t s_main_app_task_handle = NULL;
 void MainApp_Task(void * params) {
   vTaskDelay(pdMS_TO_TICKS(10));
 
-  printf("\r\n--- BOli2 Launching CSP Static Network (Zero-Heap) ---\r\n");
+  printf("\r\n--- Launching CSP Static Network (Zero-Heap) ---\r\n");
 
   // Static storage (.data segment) -- no dynamic allocation.
   static AltChannel chan_A;
